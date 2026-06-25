@@ -50,12 +50,17 @@ class TennisTradingBot:
         notifier: TelegramNotifier,
         alert_logger: AlertLogger,
         poll_interval_seconds: int = config.POLL_INTERVAL_SECONDS,
+        opening_odds_tracker: Optional[object] = None,
     ):
         self.data_provider = data_provider
         self.trading_engine = trading_engine
         self.notifier = notifier
         self.alert_logger = alert_logger
         self.poll_interval_seconds = poll_interval_seconds
+        # Referencia opcional solo para poder cerrar su conexión Mongo
+        # de forma ordenada al detener el bot (ver run_forever). El
+        # propio data_provider ya lo usa internamente si se le inyectó.
+        self.opening_odds_tracker = opening_odds_tracker
 
         self._running = False
 
@@ -72,6 +77,8 @@ class TennisTradingBot:
             time.sleep(self.poll_interval_seconds)
 
         self.alert_logger.close()
+        if self.opening_odds_tracker is not None:
+            self.opening_odds_tracker.close()
         logger.info("Bot detenido limpiamente.")
 
     def stop(self) -> None:
@@ -144,26 +151,54 @@ class TennisTradingBot:
 
 def _build_default_bot() -> TennisTradingBot:
     """
-    Construye el bot con las implementaciones por defecto. Aislar esta
-    función facilita sustituir, por ejemplo, MockBetsAPIProvider por
-    RapidAPITennisProvider (API real) sin tocar el resto de main.py.
-    """
-    data_provider = MockBetsAPIProvider()
+    Construye el bot con las implementaciones por defecto.
 
-    # Para conectar un producto real de RapidAPI, sustituir la línea
-    # anterior por algo como:
-    #
-    #   from data_provider import RapidAPITennisProvider
-    #   data_provider = RapidAPITennisProvider(
-    #       api_key=config.RAPIDAPI_KEY,
-    #       api_host=config.RAPIDAPI_HOST,
-    #       base_url=config.RAPIDAPI_BASE_URL,
-    #       live_endpoint=config.RAPIDAPI_LIVE_ENDPOINT,
-    #   )
-    #
-    # Recuerda ajustar RapidAPITennisProvider._normalize_raw_match()
-    # a la estructura JSON real que devuelva el producto contratado.
-    #
+    Usa RapidAPITennisProvider (producto "Tennis API - ATP WTA ITF",
+    ya confirmado contra respuestas reales) si hay una RAPIDAPI_KEY
+    configurada en .env; si no, cae automáticamente a
+    MockBetsAPIProvider para que el bot siga siendo ejecutable sin
+    credenciales (por ejemplo, recién clonado el repo).
+
+    Cuando se usa RapidAPITennisProvider, también se construye un
+    OpeningOddsTracker (ver opening_odds_tracker.py) y se inyecta en
+    el provider: resuelve el problema de que el endpoint de cuotas en
+    vivo solo da los últimos 10 movimientos, insuficiente como cuota
+    pre-partido para partidos que ya llevan tiempo jugándose.
+    """
+    opening_odds_tracker = None
+
+    if config.RAPIDAPI_KEY and config.RAPIDAPI_KEY != "TU_RAPIDAPI_KEY_AQUI":
+        from data_provider import RapidAPITennisProvider
+        from opening_odds_tracker import OpeningOddsTracker
+
+        opening_odds_tracker = OpeningOddsTracker(
+            mongo_uri=config.MONGO_URI,
+            db_name=config.MONGO_DB_NAME,
+            fixtures_collection=config.MONGO_FIXTURES_COLLECTION,
+            opening_odds_collection=config.MONGO_OPENING_ODDS_COLLECTION,
+            tournament_info_collection=config.MONGO_TOURNAMENT_INFO_COLLECTION,
+            fixtures_refresh_interval_seconds=config.FIXTURES_REFRESH_INTERVAL_SECONDS,
+            orphan_retry_cooldown_seconds=config.ORPHAN_LOOKUP_COOLDOWN_SECONDS,
+            server_selection_timeout_ms=config.MONGO_SERVER_SELECTION_TIMEOUT_MS,
+        )
+
+        data_provider = RapidAPITennisProvider(
+            api_key=config.RAPIDAPI_KEY,
+            api_host=config.RAPIDAPI_HOST,
+            base_url=config.RAPIDAPI_BASE_URL,
+            live_endpoint=config.RAPIDAPI_LIVE_ENDPOINT,
+            fetch_odds=config.RAPIDAPI_FETCH_ODDS,
+            opening_odds_tracker=opening_odds_tracker,
+            fixtures_tour_types=config.FIXTURES_TOUR_TYPES,
+        )
+        logger.info("Usando RapidAPITennisProvider (host=%s) como fuente de datos.", config.RAPIDAPI_HOST)
+    else:
+        data_provider = MockBetsAPIProvider()
+        logger.warning(
+            "RAPIDAPI_KEY no configurada en .env; usando MockBetsAPIProvider "
+            "(datos simulados, no reales). Rellena .env para conectar datos reales."
+        )
+
     # Alternativa NO recomendada (scraping de Flashscore), solo si se
     # agotan los créditos gratuitos y se acepta el riesgo (ver
     # flashscore_scraper.py y config.FLASHSCORE_SCRAPING_ENABLED):
@@ -191,6 +226,7 @@ def _build_default_bot() -> TennisTradingBot:
         notifier=notifier,
         alert_logger=alert_logger,
         poll_interval_seconds=config.POLL_INTERVAL_SECONDS,
+        opening_odds_tracker=opening_odds_tracker,
     )
 
 

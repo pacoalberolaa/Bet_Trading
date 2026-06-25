@@ -4,30 +4,51 @@ config.py
 Configuración centralizada del bot. Aquí se definen credenciales,
 umbrales de negocio y parámetros del motor de reglas.
 
-En producción, las credenciales (TOKEN, CHAT_ID, API_KEY, MONGO_URI)
-deberían cargarse desde variables de entorno (os.environ) o un .env,
-nunca hardcodeadas. Se deja como variables simples con valores por
-defecto para facilitar el setup inicial.
+Las credenciales (TOKEN, CHAT_ID, API_KEY, MONGO_URI) se cargan desde
+variables de entorno. Para desarrollo local, se leen automáticamente
+desde un archivo `.env` en la raíz del proyecto (ver `.env.example`
+como plantilla). En producción (Docker, un servidor, CI/CD), basta con
+exportar esas mismas variables de entorno directamente; el `.env` es
+solo una comodidad para no tener que exportarlas a mano cada vez.
+
+IMPORTANTE: el archivo `.env` con tus claves reales NUNCA debe subirse
+a git (ya está excluido en `.gitignore`). Solo `.env.example` (sin
+secretos) se versiona.
 """
 
 import os
+
+from dotenv import load_dotenv
+
+# Carga las variables definidas en .env al entorno del proceso, si el
+# archivo existe. Si no existe (p. ej. en un servidor donde ya se
+# exportaron las variables manualmente), no falla: simplemente no
+# sobreescribe nada y os.getenv() seguirá leyendo del entorno real.
+load_dotenv()
 
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "TU_TOKEN_AQUI")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "TU_CHAT_ID_AQUI")
 
-# --- Proveedor de datos: RapidAPI (genérico) ---
-# Diseñado contra el patrón estándar de cualquier producto de tenis en
-# RapidAPI: headers X-RapidAPI-Key / X-RapidAPI-Host + una base_url
-# propia de cada producto. Cuando tengas cuenta, solo hace falta
-# rellenar estas variables (o exportarlas como entorno) y, si el
-# producto elegido tiene una estructura de JSON distinta, ajustar el
-# mapeo en RapidAPITennisProvider._normalize_raw_match().
+# --- Proveedor de datos: RapidAPI ---
+# Producto confirmado y en uso: "Tennis API - ATP WTA ITF"
+# (host tennis-api-atp-wta-itf.p.rapidapi.com). Los valores por
+# defecto de HOST/BASE_URL/ENDPOINT ya corresponden a este producto;
+# solo necesitas rellenar tu RAPIDAPI_KEY real (en .env, NUNCA aquí).
+# Si en el futuro cambias a otro producto de RapidAPI, sobreescribe
+# estas 4 variables vía entorno y revisa
+# RapidAPITennisProvider._normalize_raw_match() en data_provider.py,
+# ya que la estructura JSON puede ser distinta entre productos.
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "TU_RAPIDAPI_KEY_AQUI")
-RAPIDAPI_HOST = os.getenv("RAPIDAPI_HOST", "TU_RAPIDAPI_HOST_AQUI")  # ej: "tennis-live-data.p.rapidapi.com"
-RAPIDAPI_BASE_URL = os.getenv("RAPIDAPI_BASE_URL", "https://TU_RAPIDAPI_HOST_AQUI")
-# Endpoint relativo de "partidos en vivo" del producto elegido (varía entre productos)
-RAPIDAPI_LIVE_ENDPOINT = os.getenv("RAPIDAPI_LIVE_ENDPOINT", "/tennis/v2/live-events")
+RAPIDAPI_HOST = os.getenv("RAPIDAPI_HOST", "tennis-api-atp-wta-itf.p.rapidapi.com")
+RAPIDAPI_BASE_URL = os.getenv("RAPIDAPI_BASE_URL", "https://tennis-api-atp-wta-itf.p.rapidapi.com")
+# Endpoint de listado de partidos en vivo (confirmado contra respuesta real)
+RAPIDAPI_LIVE_ENDPOINT = os.getenv("RAPIDAPI_LIVE_ENDPOINT", "/tennis/v2/extend/api/events/live")
+# Si False, RapidAPITennisProvider no consulta cuotas por partido (más
+# rápido / menos créditos gastados), pero entonces TODOS los partidos
+# se descartarán en _safe_parse_match() por falta de cuota pre-partido,
+# ya que el motor de reglas la necesita obligatoriamente (Filtro 1).
+RAPIDAPI_FETCH_ODDS = os.getenv("RAPIDAPI_FETCH_ODDS", "true").lower() == "true"
 
 # --- Proveedor de datos alternativo: scraping de Flashscore (OPCIONAL, NO recomendado) ---
 # Flashscore prohíbe explícitamente el scraping automatizado en sus
@@ -55,8 +76,44 @@ POLL_INTERVAL_SECONDS = 15
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "tennis_trading_bot")
 MONGO_ALERTS_COLLECTION = os.getenv("MONGO_ALERTS_COLLECTION", "trading_alerts")
+# Colección donde se guardan los fixtures (partidos programados) del
+# día, refrescados periódicamente, para poder cruzarlos con los
+# partidos que van apareciendo en events/live y así capturar su cuota
+# de apertura real (ver opening_odds_tracker.py).
+MONGO_FIXTURES_COLLECTION = os.getenv("MONGO_FIXTURES_COLLECTION", "fixtures")
+# Colección donde se guarda, una sola vez por partido, la cuota
+# capturada en el momento en que se detectó por primera vez en vivo
+# (la mejor aproximación disponible a la cuota pre-partido real).
+MONGO_OPENING_ODDS_COLLECTION = os.getenv("MONGO_OPENING_ODDS_COLLECTION", "opening_odds")
+# Colección donde se cachea la categoría/superficie real de cada
+# torneo (resuelta vía /tennis/v2/{type}/tournament/info/{id}), para
+# no volver a pedir ese endpoint en cada ciclo de polling: la
+# categoría y superficie de un torneo no cambian durante su disputa.
+MONGO_TOURNAMENT_INFO_COLLECTION = os.getenv("MONGO_TOURNAMENT_INFO_COLLECTION", "tournament_info")
 # Timeout corto para no bloquear el bucle de polling si Mongo no responde
 MONGO_SERVER_SELECTION_TIMEOUT_MS = 5000
+
+# --- Fixtures: refresco periódico ---
+# Cada cuántos segundos se vuelve a consultar /fixtures/{fecha} para
+# refrescar la lista de partidos programados de hoy (y de mañana, por
+# si el bot sigue corriendo cerca de medianoche). No hace falta que
+# sea tan frecuente como el polling de partidos en vivo.
+FIXTURES_REFRESH_INTERVAL_SECONDS = 1800  # 30 minutos
+# Tipos de circuito para los que se consultan fixtures (la ruta real
+# es /tennis/v2/{type}/fixtures/{fecha})
+FIXTURES_TOUR_TYPES = ["atp", "wta"]
+
+# --- Fixtures: refresco "bajo demanda" para partidos huérfanos ---
+# Cuando un partido nuevo en events/live no cruza con ningún fixture
+# ya guardado (típicamente porque empezó después del último refresco
+# periódico), en vez de esperar al siguiente refresco programado
+# (hasta 30 min), se dispara un refresco dirigido inmediato SOLO del
+# tour_type de ese partido. Si tras ese refresco inmediato sigue sin
+# encontrarse, se aplica este cooldown antes de reintentarlo de nuevo,
+# para no martillear la API en cada ciclo de 15s si el partido
+# realmente no tiene fixture (qualy de última hora, dato inconsistente
+# del proveedor, etc).
+ORPHAN_LOOKUP_COOLDOWN_SECONDS = 120  # 2 minutos
 
 # --- Circuitos soportados ---
 CIRCUIT_ATP = "ATP"
@@ -67,18 +124,36 @@ SURFACE_CLAY = "Tierra Batida"
 SURFACE_GRASS = "Hierba"
 SURFACE_HARD = "Dura"
 
+# Mapeo de nombres de superficie tal como los devuelve la API
+# (en inglés, vistos en tournament/info -> court.name: "Hard", "Clay",
+# "Grass", "Carpet"...) hacia las constantes en español que usa
+# trading_engine.py. Sin esta traducción, el Filtro 3 (condicional de
+# superficie) nunca reconocería tierra batida ni hierba reales y todo
+# caería por defecto en la rama de "Dura", rompiendo silenciosamente
+# la regla de superficie ya validada.
+SURFACE_NAME_TRANSLATIONS = {
+    "hard": SURFACE_HARD,
+    "clay": SURFACE_CLAY,
+    "grass": SURFACE_GRASS,
+    "carpet": SURFACE_HARD,  # moqueta indoor: se trata como pista dura a efectos del motor de reglas
+    "indoor hard": SURFACE_HARD,
+    "indoor clay": SURFACE_CLAY,
+}
+
 # --- Jerarquía de categorías de torneo (de mayor a menor prioridad) ---
 # Se usa para ORDENAR el procesamiento de partidos en cada ciclo de
 # polling: los torneos grandes se evalúan y notifican antes que los
 # pequeños. No filtra ni excluye ningún torneo, solo decide el orden.
+#
+# Estos 5 niveles son los que el propio proveedor de datos distingue
+# de forma fiable (ver RANK_ID_TO_CATEGORY más abajo): no separa ATP/WTA
+# 500 de 250 (ambos caen en su nivel "Main tour"), así que se agrupan
+# en una sola categoría "Tour" en vez de inventar una distinción que
+# la fuente de datos no ofrece.
 TOURNAMENT_CATEGORY_PRIORITY = [
     "Grand Slam",
     "Masters 1000",
-    "WTA 1000",
-    "ATP 500",
-    "WTA 500",
-    "ATP 250",
-    "WTA 250",
+    "Tour",        # ATP/WTA 500 + ATP/WTA 250 (el proveedor no los distingue)
     "Challenger",
     "ITF",
 ]
@@ -89,11 +164,32 @@ TOURNAMENT_CATEGORY_PRIORITY = [
 # grandes correctamente identificados.
 TOURNAMENT_CATEGORY_UNKNOWN = "Desconocido"
 
+# Mapeo OFICIAL confirmado contra el endpoint
+# /tennis/v2/ms-api/calendar/atp/filters (campo "levels") de
+# "Tennis API - ATP WTA ITF": traduce el "rankId" devuelto por
+# /tennis/v2/{type}/tournament/info/{tournamentId} a la categoría
+# canónica usada en TOURNAMENT_CATEGORY_PRIORITY. Esta es la fuente
+# PRIMARIA y fiable de categoría (no una heurística por nombre).
+#
+# rankId oficiales NO relacionados con torneos individuales de
+# singles/dobles regulares (Davis/Fed Cup, Juniors, Olympics, etc.) se
+# omiten a propósito: si aparecen, caerán en TOURNAMENT_CATEGORY_UNKNOWN.
+RANK_ID_TO_CATEGORY = {
+    0: "ITF",          # "Futures/Satellites/ITF tournaments $10K"
+    1: "Challenger",   # "Challengers/ITF tournaments > $10K"
+    2: "Tour",         # "Main tour" (agrupa ATP/WTA 500 y 250)
+    3: "Masters 1000",  # "Masters series"
+    4: "Grand Slam",   # "Grand Slam"
+    7: "Tour",         # "Tour finals" (ATP/WTA Finals) -> se trata como big-tour
+}
+
 # Mapeo de alias / variantes de texto que distintas APIs usan para
 # referirse a la misma categoría, normalizados a las claves de
-# TOURNAMENT_CATEGORY_PRIORITY. Ampliar este diccionario es la forma
-# recomendada de adaptar el bot a la nomenclatura exacta que use tu
-# proveedor de datos real.
+# TOURNAMENT_CATEGORY_PRIORITY. Se usa como FUENTE SECUNDARIA (texto
+# del nombre del torneo) cuando no se dispone del rankId oficial
+# (p.ej. el endpoint events/live no trae tournamentId, solo el nombre
+# de la liga). Ampliar este diccionario es la forma recomendada de
+# adaptar el bot a nomenclatura adicional que vayas observando.
 TOURNAMENT_CATEGORY_ALIASES = {
     "grandslam": "Grand Slam",
     "grand slam": "Grand Slam",
@@ -101,18 +197,23 @@ TOURNAMENT_CATEGORY_ALIASES = {
     "masters1000": "Masters 1000",
     "masters 1000": "Masters 1000",
     "atp masters 1000": "Masters 1000",
-    "wta1000": "WTA 1000",
-    "wta 1000": "WTA 1000",
-    "atp500": "ATP 500",
-    "atp 500": "ATP 500",
-    "wta500": "WTA 500",
-    "wta 500": "WTA 500",
-    "atp250": "ATP 250",
-    "atp 250": "ATP 250",
-    "wta250": "WTA 250",
-    "wta 250": "WTA 250",
+    "masters series": "Masters 1000",
+    "wta1000": "Masters 1000",
+    "wta 1000": "Masters 1000",
+    "main tour": "Tour",
+    "tour finals": "Tour",
+    "atp500": "Tour",
+    "atp 500": "Tour",
+    "wta500": "Tour",
+    "wta 500": "Tour",
+    "atp250": "Tour",
+    "atp 250": "Tour",
+    "wta250": "Tour",
+    "wta 250": "Tour",
     "challenger": "Challenger",
     "atp challenger": "Challenger",
+    "challengers/itf tournaments > $10k": "Challenger",
     "itf": "ITF",
     "itf world tennis tour": "ITF",
+    "futures/satellites/itf tournaments $10k": "ITF",
 }

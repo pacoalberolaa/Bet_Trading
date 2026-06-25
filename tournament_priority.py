@@ -16,9 +16,10 @@ ordenación, y así evitamos duplicarla.
 
 from __future__ import annotations
 
-from typing import List, TypeVar
+from typing import List, Optional, TypeVar
 
 from config import (
+    RANK_ID_TO_CATEGORY,
     TOURNAMENT_CATEGORY_ALIASES,
     TOURNAMENT_CATEGORY_PRIORITY,
     TOURNAMENT_CATEGORY_UNKNOWN,
@@ -28,11 +29,31 @@ from models import MatchState
 T = TypeVar("T")
 
 
+def normalize_category_from_rank_id(rank_id: Optional[int]) -> str:
+    """
+    Fuente PRIMARIA de categoría: traduce el "rankId" oficial devuelto
+    por /tennis/v2/{type}/tournament/info/{tournamentId} (confirmado
+    contra /tennis/v2/ms-api/calendar/atp/filters) a la categoría
+    canónica. Es fiable porque viene directamente del proveedor de
+    datos, no se infiere de texto libre.
+
+    Devuelve TOURNAMENT_CATEGORY_UNKNOWN si rank_id es None o no está
+    en el mapeo (p.ej. Davis Cup, Juniors, Olympics, que no son
+    relevantes para la priorización de singles/dobles regulares).
+    """
+    if rank_id is None:
+        return TOURNAMENT_CATEGORY_UNKNOWN
+    return RANK_ID_TO_CATEGORY.get(rank_id, TOURNAMENT_CATEGORY_UNKNOWN)
+
+
 def normalize_tournament_category(raw_category: str) -> str:
     """
-    Convierte el texto de categoría tal como lo informa la API (puede
-    venir en mayúsculas, sin espacios, con variantes, etc.) a una de
-    las claves canónicas de config.TOURNAMENT_CATEGORY_PRIORITY.
+    Fuente SECUNDARIA de categoría (heurística por texto): se usa
+    cuando no se dispone del rankId oficial del torneo (p.ej. al leer
+    directamente el nombre de "league" en events/live, que no trae
+    tournamentId). Convierte el texto de categoría/nombre tal como lo
+    informa la API a una de las claves canónicas de
+    config.TOURNAMENT_CATEGORY_PRIORITY.
 
     Si no se reconoce ninguna variante, devuelve
     config.TOURNAMENT_CATEGORY_UNKNOWN en lugar de fallar, para que un
