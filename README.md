@@ -227,6 +227,128 @@ ese riesgo si se agotan los créditos gratuitos de RapidAPI; el método
 una guía orientativa, en vez de scraping funcional listo para usar,
 para forzar una decisión consciente antes de activarlo.
 
+## Modos de ejecución (planes con límite diario bajo)
+
+El bot soporta tres modos, seleccionados por variables de entorno
+(en este orden de prioridad si varias están activas: `ALERT_ONLY_MODE_ENABLED`
+> `MANUAL_MODE_ENABLED` > automático por defecto):
+
+| Modo | Variable | Qué hace | Cuándo usarlo |
+|---|---|---|---|
+| **Solo alerta** | `ALERT_ONLY_MODE_ENABLED=true` | Avisa una vez por candidato, dentro de una ventana horaria | **Primera fase**: validar si la metodología funciona, con el plan Free de RapidAPI |
+| **Manual con seguimiento** | `MANUAL_MODE_ENABLED=true` | Avisa, tú eliges con `.{game_id}`, sigue el partido y avisa de nuevo si rompen el saque | Cuando quieras automatizar el seguimiento sin pagar plan grande |
+| **Automático** | (ninguna de las anteriores) | Vigila todos los partidos en vivo cada 15s, sin intervención | Producción real, con un plan de RapidAPI que soporte ese ritmo (Pro/Ultra) |
+
+### Modo "solo alerta" — recomendado para empezar
+
+El más simple: **sin selección ni seguimiento automático**. El bot
+escanea `events/live` únicamente dentro de una ventana horaria
+configurable y manda un único aviso de Telegram por partido que
+cumpla el bache+cuota — igual de detallado que la alerta automática,
+sin la instrucción de seguimiento. A partir de ahí, tú decides
+manualmente cuándo entrar y cuándo anotar el resultado (si rompen el
+saque del no favorito). Es la base para validar si la metodología
+funciona antes de automatizar nada más.
+
+**Por qué existe una ventana horaria**: pensado para el plan **Free
+de RapidAPI** (50 requests/día, límite duro). Si el operador solo
+puede estar pendiente del trading hasta cierta hora (p. ej. de
+lunes a viernes, 9:00 a 16:00), no tiene sentido gastar requests
+fuera de ese rango — el bot duerme sin llamar a la API hasta que la
+ventana vuelve a abrirse.
+
+**Cálculo del intervalo de escaneo**: con una ventana de 7 horas
+(9:00-16:00) y 50 requests/día, el intervalo que agota exactamente el
+límite es `25200s / 50 ≈ 504s` (8 min 24s). Se aplica un margen de
+seguridad del 10% (reservando esas requests para imprevistos: pruebas
+manuales, un ciclo extra al arrancar/parar el despliegue), resultando
+en **540s (9 minutos)** por defecto, que consume ~46-47 de las 50
+requests disponibles cada día activo.
+
+Si cambias la ventana horaria, el límite de tu plan, o quieres menos
+margen de seguridad, recalcula con:
+
+```
+intervalo_segundos = segundos_de_ventana / (limite_diario_requests × 0.9)
+```
+
+Configuración (ver `.env.example` para todas las variables):
+
+```bash
+ALERT_ONLY_MODE_ENABLED=true
+ALERT_ONLY_MODE_TIMEZONE=Europe/Madrid
+ALERT_ONLY_MODE_START_TIME=09:00
+ALERT_ONLY_MODE_END_TIME=16:00
+ALERT_ONLY_MODE_ACTIVE_WEEKDAYS=0,1,2,3,4
+ALERT_ONLY_MODE_SCAN_INTERVAL_SECONDS=540
+```
+
+La gestión de la ventana (incluyendo el cambio de horario de
+verano/invierno) vive en `trading_window.py`, usando `zoneinfo`
+(estándar de Python) en vez de cálculos manuales de offset UTC.
+
+### Modo manual con seguimiento
+
+Pensado para el plan **Free de RapidAPI** (50 requests/día, límite
+duro): el ciclo automático normal (cada 15s) agota ese límite en
+minutos. Este modo invierte el flujo: en vez de vigilar todos los
+partidos en vivo continuamente, **el bot presenta candidatos y tú
+eliges cuál seguir de cerca**.
+
+Activación: `MANUAL_MODE_ENABLED=true` en `.env`. Cuando está activo,
+`main.py` construye `ManualWatchBot` (en `main.py`) en lugar de
+`TennisTradingBot`, compartiendo el mismo `data_provider`,
+`trading_engine` y `notifier` que el modo automático.
+
+### Flujo
+
+1. **Escaneo de candidatos** (cada `MANUAL_MODE_SCAN_INTERVAL_SECONDS`,
+   300s/5min por defecto): se consulta `events/live` completo y se
+   evalúa cada partido con el mismo `trading_engine` de siempre. Cada
+   partido que cumple el bache se presenta en Telegram como
+   **candidato**, con un mensaje igual al de la alerta automática más
+   una instrucción: `Responde con .{game_id} para seguir este partido`.
+2. **Selección**: respondes en el chat con `.` seguido del `game_id`
+   exacto que viste en el mensaje (p.ej. `.3681090`). El bot lee los
+   mensajes nuevos en cada ciclo base (vía `getUpdates` de Telegram,
+   que **no consume cuota de RapidAPI**, solo de la propia API de
+   Telegram) y mueve ese partido a seguimiento activo, confirmando con
+   un mensaje.
+3. **Seguimiento activo** (cada `MANUAL_MODE_WATCH_INTERVAL_SECONDS`,
+   300s/5min por defecto): solo para los partidos ya elegidos, se
+   vuelve a consultar el marcador. Si el déficit de juegos del
+   favorito **aumentó** desde la última vez (nuevo break), se envía
+   una alerta corta de seguimiento y se persiste en MongoDB.
+4. Si un partido en seguimiento deja de aparecer en `events/live`
+   (terminó), se retira automáticamente de la watchlist.
+
+### Por qué 5 minutos
+
+La duración media de un juego de servicio en tenis profesional es de
+unos 4 minutos (ver discusión de diseño). Consultar cada 5 minutos
+significa que, en la mayoría de los ciclos, el marcador habrá avanzado
+al menos un juego desde la última consulta — ni tan frecuente como
+para gastar requests "en vano" entre juegos, ni tan espaciado como
+para perderse varios juegos seguidos.
+
+Con 50 requests/día y una consulta cada 5 minutos, puedes seguir **un
+partido completo** (≈ 4 horas) sin agotar el límite, dejando margen
+para el escaneo periódico de candidatos.
+
+### Limitaciones de este modo (deliberadas)
+
+- El estado de candidatos ofrecidos y partidos en seguimiento vive
+  **en memoria del proceso**, no en MongoDB: un reinicio del bot
+  pierde los candidatos pendientes de elegir y el seguimiento activo
+  ya confirmado (las alertas ya disparadas SÍ quedan persistidas).
+- Solo se sigue el marcador (déficit de juegos); no se reevalúa el
+  resto del motor de reglas (superficie, cuota) en cada ciclo de
+  seguimiento — la decisión de "esto es un candidato válido" ya se
+  tomó al ofrecerlo.
+- Un código de selección caduca tras `MANUAL_MODE_CANDIDATE_TTL_SECONDS`
+  (1 hora por defecto): si respondes `.{game_id}` mucho después de
+  que se ofreciera, el bot lo rechaza con un mensaje de caducidad.
+
 ## Reglas del motor (`trading_engine.py`)
 
 1. **Favoritismo real**: cuota pre-partido del favorito estrictamente

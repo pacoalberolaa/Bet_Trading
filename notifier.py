@@ -1,9 +1,14 @@
 """
 notifier.py
 -----------
-Servicio de mensajería. Encapsula el envío de alertas a Telegram
-usando peticiones HTTP puras contra la Bot API (sin dependencia de
-python-telegram-bot, para mantener el footprint mínimo).
+Servicio de mensajería. Encapsula el envío Y LECTURA de mensajes con
+Telegram usando peticiones HTTP puras contra la Bot API (sin
+dependencia de python-telegram-bot, para mantener el footprint mínimo).
+
+Además del envío de alertas (modo automático original), soporta el
+"modo de prueba manual" (ver watchlist_manager.py): presenta partidos
+candidatos y lee las respuestas del usuario (mensajes que empiezan por
+".") para saber a qué partido seguir de cerca.
 
 Se usa httpx por su soporte nativo de timeouts y por ser fácilmente
 intercambiable por requests si se prefiere.
@@ -12,6 +17,7 @@ intercambiable por requests si se prefiere.
 from __future__ import annotations
 
 import logging
+from typing import List, Optional, Tuple
 
 import httpx
 
@@ -25,22 +31,62 @@ class TelegramNotifierError(Exception):
 
 
 class TelegramNotifier:
-    """Cliente mínimo para enviar mensajes formateados a un chat de Telegram."""
+    """Cliente mínimo para enviar y leer mensajes de un chat de Telegram."""
 
     def __init__(self, bot_token: str, chat_id: str, timeout: float = 10.0):
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.timeout = timeout
         self._base_url = f"https://api.telegram.org/bot{self.bot_token}"
+        # offset de getUpdates: id del último update_id ya procesado + 1.
+        # Se mantiene en memoria; si el bot se reinicia, Telegram sigue
+        # entregando los updates pendientes (no se pierden, solo se
+        # podrían reprocesar algunos ya vistos, lo cual es inocuo aquí
+        # porque _parse_selection_command es idempotente por game_id).
+        self._update_offset: Optional[int] = None
 
     def send_alert(self, alert: AlertEvent) -> bool:
         """
-        Envía la alerta formateada. Devuelve True si Telegram confirmó
-        la entrega, False si hubo un fallo controlado (se loguea pero
-        no se interrumpe el bucle principal del bot).
+        Envía la alerta formateada (modo automático original). Devuelve
+        True si Telegram confirmó la entrega, False si hubo un fallo
+        controlado (se loguea pero no se interrumpe el bucle principal).
         """
         message = self._format_message(alert)
         return self._send_message(message)
+
+    def send_candidate_prompt(self, alert: AlertEvent, selection_code: str) -> bool:
+        """
+        Envía un partido CANDIDATO (modo de prueba manual): el mismo
+        contenido informativo que send_alert, pero con una instrucción
+        explícita de cómo seleccionarlo para iniciar el seguimiento.
+        """
+        message = (
+            self._format_message(alert)
+            + f"\n\n👉 Responde con *{selection_code}* para seguir este "
+            "partido cada 5 minutos."
+        )
+        return self._send_message(message)
+
+    def send_break_alert(self, alert: AlertEvent, games_favorite: int, games_underdog: int) -> bool:
+        """
+        Envía la alerta de SEGUIMIENTO: se usa cuando, durante el
+        seguimiento activo de un partido ya elegido por el usuario, se
+        detecta un NUEVO break en contra del favorito respecto al
+        último marcador visto. Mensaje más corto que la alerta inicial,
+        pensado para lectura rápida en medio de un seguimiento ya en marcha.
+        """
+        message = (
+            "⚠️ *NUEVO BREAK EN CONTRA DEL FAVORITO* ⚠️\n\n"
+            f"🎾 {alert.favorite_name} vs {alert.underdog_name}\n"
+            f"📊 Marcador actual: Set {alert.current_set} "
+            f"[{games_favorite}-{games_underdog}] ({alert.score_points})\n"
+            f"➡️ Cuota LIVE: {alert.odds_live_favorite:.2f}"
+        )
+        return self._send_message(message)
+
+    def send_plain_message(self, text: str) -> bool:
+        """Envía un mensaje de texto plano (sin formato de alerta), p.ej. confirmaciones de seguimiento."""
+        return self._send_message(text)
 
     @staticmethod
     def _format_message(alert: AlertEvent) -> str:
@@ -96,6 +142,73 @@ class TelegramNotifier:
             # JSON malformado en la respuesta de Telegram (poco común, pero posible)
             logger.error("Respuesta de Telegram con JSON inválido: %s", exc)
             return False
+
+    # ------------------------------------------------------------------
+    # Lectura de mensajes (modo de prueba manual)
+    # ------------------------------------------------------------------
+
+    def get_new_selection_commands(self) -> List[Tuple[int, str]]:
+        """
+        Consulta getUpdates y devuelve la lista de comandos de
+        selección nuevos: tuplas (update_id, texto_completo_del_mensaje)
+        para cada mensaje del chat configurado que empiece por ".".
+
+        Avanza automáticamente el offset interno para no releer los
+        mismos mensajes en la siguiente llamada (vía el parámetro
+        "offset" de getUpdates, que le dice a Telegram que puede
+        descartar updates ya confirmados).
+        """
+        url = f"{self._base_url}/getUpdates"
+        params = {"timeout": 0}
+        if self._update_offset is not None:
+            params["offset"] = self._update_offset
+
+        try:
+            response = httpx.get(url, params=params, timeout=self.timeout)
+            response.raise_for_status()
+            data = response.json()
+        except httpx.RequestError as exc:
+            logger.warning("Error de red leyendo mensajes de Telegram (getUpdates): %s", exc)
+            return []
+        except httpx.HTTPStatusError as exc:
+            logger.warning("Telegram (getUpdates) devolvió error HTTP %s", exc.response.status_code)
+            return []
+        except ValueError as exc:
+            logger.warning("Respuesta de Telegram (getUpdates) con JSON inválido: %s", exc)
+            return []
+
+        if not data.get("ok", False):
+            logger.warning("Telegram (getUpdates) respondió ok=False: %s", data)
+            return []
+
+        results = data.get("result", [])
+        commands: List[Tuple[int, str]] = []
+        highest_update_id = self._update_offset - 1 if self._update_offset else None
+
+        for update in results:
+            update_id = update.get("update_id")
+            if update_id is None:
+                continue
+            if highest_update_id is None or update_id > highest_update_id:
+                highest_update_id = update_id
+
+            message = update.get("message") or {}
+            chat = message.get("chat") or {}
+            text = message.get("text", "")
+
+            # Solo procesamos mensajes del chat configurado, para evitar
+            # que comandos de otro chat (si el bot estuviera en varios
+            # grupos) interfieran con el seguimiento de este bot.
+            if str(chat.get("id")) != str(self.chat_id):
+                continue
+
+            if text.startswith("."):
+                commands.append((update_id, text))
+
+        if highest_update_id is not None:
+            self._update_offset = highest_update_id + 1
+
+        return commands
 
     # ------------------------------------------------------------------
     # FUTURO: integración con Betfair Exchange

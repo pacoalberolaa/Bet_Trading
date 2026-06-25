@@ -103,6 +103,65 @@ FIXTURES_REFRESH_INTERVAL_SECONDS = 1800  # 30 minutos
 # es /tennis/v2/{type}/fixtures/{fecha})
 FIXTURES_TOUR_TYPES = ["atp", "wta"]
 
+# --- Modo de prueba manual con seguimiento (bajo consumo de requests) ---
+# Pensado para planes con límite diario bajo de RapidAPI (p.ej. Free,
+# 50 requests/día). En vez de vigilar TODOS los partidos en vivo de
+# forma continua, el bot detecta candidatos (bache + cuota favorita)
+# y los presenta en Telegram; solo empieza a vigilar de cerca el
+# partido que el usuario elige respondiendo ".{game_id}" en el chat.
+# Útil cuando ya se ha validado la metodología y se quiere automatizar
+# también el seguimiento del break posterior. Ver MODO MÁS SIMPLE
+# (ALERT_ONLY_MODE_ENABLED) más abajo para validar la metodología
+# primero, sin automatizar nada del seguimiento.
+MANUAL_MODE_ENABLED = os.getenv("MANUAL_MODE_ENABLED", "false").lower() == "true"
+# Cada cuántos segundos se vuelve a consultar el marcador de un
+# partido YA elegido por el usuario (en seguimiento activo). Un valor
+# más alto consume menos requests pero detecta los breaks con más
+# retraso. 300s (5 min) es razonable: la duración media de un juego de
+# servicio en tenis profesional es de unos 4 minutos.
+MANUAL_MODE_WATCH_INTERVAL_SECONDS = int(os.getenv("MANUAL_MODE_WATCH_INTERVAL_SECONDS", "300"))
+# Cada cuántos segundos se vuelve a consultar events/live al completo
+# para detectar NUEVOS candidatos (partidos que empiezan a cumplir el
+# bache). Puede ser más espaciado que el polling automático normal,
+# ya que solo se usa para ofrecer candidatos, no para seguimiento fino.
+MANUAL_MODE_SCAN_INTERVAL_SECONDS = int(os.getenv("MANUAL_MODE_SCAN_INTERVAL_SECONDS", "300"))
+# Cuánto tiempo (segundos) sigue siendo válido un código de selección
+# ".{game_id}" tras ofrecerse como candidato, antes de caducar.
+MANUAL_MODE_CANDIDATE_TTL_SECONDS = int(os.getenv("MANUAL_MODE_CANDIDATE_TTL_SECONDS", "3600"))
+
+# --- Modo "solo alerta" (el más simple, para validar la metodología) ---
+# Sin selección ni seguimiento automático: el bot escanea events/live
+# dentro de una ventana horaria acotada (días y horas configurables) y
+# manda un único aviso por partido que cumpla el bache+cuota. El propio
+# usuario decide manualmente cuándo entrar y cuándo registrar el pick
+# si rompen el saque del no favorito — nada de eso lo automatiza el bot
+# en este modo. Pensado para una primera fase de validación con el plan
+# Free de RapidAPI (50 requests/día), antes de automatizar el resto.
+ALERT_ONLY_MODE_ENABLED = os.getenv("ALERT_ONLY_MODE_ENABLED", "false").lower() == "true"
+# Zona horaria del usuario para interpretar la ventana de trading.
+# Se usa zoneinfo (estándar de Python), que maneja automáticamente el
+# cambio de horario de verano/invierno sin cálculos manuales.
+ALERT_ONLY_MODE_TIMEZONE = os.getenv("ALERT_ONLY_MODE_TIMEZONE", "Europe/Madrid")
+# Hora de inicio/fin de la ventana de trading, en formato "HH:MM", en
+# la zona horaria anterior. Solo se escanea events/live dentro de esta
+# ventana; fuera de ella, el bot no hace ninguna llamada a RapidAPI.
+ALERT_ONLY_MODE_START_TIME = os.getenv("ALERT_ONLY_MODE_START_TIME", "09:00")
+ALERT_ONLY_MODE_END_TIME = os.getenv("ALERT_ONLY_MODE_END_TIME", "16:00")
+# Días de la semana activos (0=lunes ... 6=domingo, como datetime.weekday()).
+# Por defecto lunes a viernes.
+ALERT_ONLY_MODE_ACTIVE_WEEKDAYS = [
+    int(d) for d in os.getenv("ALERT_ONLY_MODE_ACTIVE_WEEKDAYS", "0,1,2,3,4").split(",")
+]
+# Intervalo de escaneo dentro de la ventana activa. 540s (9 min) está
+# calculado para consumir ~46-47 de las 50 requests/día disponibles en
+# una ventana de 7h (9:00-16:00), dejando un margen de seguridad de
+# ~10% para imprevistos (pruebas manuales, ciclo extra al arrancar).
+ALERT_ONLY_MODE_SCAN_INTERVAL_SECONDS = int(os.getenv("ALERT_ONLY_MODE_SCAN_INTERVAL_SECONDS", "540"))
+# Cada cuántos segundos se revisa el reloj para saber si toca dormir
+# (fuera de ventana) o escanear (dentro de ventana). No consume
+# requests de RapidAPI, solo decide cuándo es momento de hacerlo.
+ALERT_ONLY_MODE_CLOCK_CHECK_INTERVAL_SECONDS = 30
+
 # --- Fixtures: refresco "bajo demanda" para partidos huérfanos ---
 # Cuando un partido nuevo en events/live no cruza con ningún fixture
 # ya guardado (típicamente porque empezó después del último refresco

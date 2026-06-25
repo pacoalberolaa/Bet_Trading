@@ -9,6 +9,8 @@ __pycache__/
 venv/
 env/
 *.egg-info/
+.env
+
 
 # Logs y datos locales (ya no se usan tras pasar a MongoDB, se deja por si acaso)
 logs/*.db
