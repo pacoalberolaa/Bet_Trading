@@ -111,6 +111,18 @@ class TennisTradingBot:
             )
 
         for match in live_matches:
+            candidate = self.trading_engine.check_candidate(match)
+            if candidate is not None:
+                logger.info(
+                    "Candidato detectado -> %s vs %s (%s, %s) | cuota favorito: %.2f",
+                    candidate.favorite_name,
+                    candidate.underdog_name,
+                    candidate.tournament_name,
+                    candidate.game_id,
+                    candidate.odds_prematch_favorite,
+                )
+                self.notifier.send_match_detected(candidate)
+
             alert = self.trading_engine.evaluate(match)
             if alert is None:
                 continue
@@ -260,6 +272,18 @@ class ManualWatchBot:
         already_watched = set(self.watchlist_manager.get_watched_game_ids())
 
         for match in live_matches:
+            candidate = self.trading_engine.check_candidate(match)
+            if candidate is not None:
+                logger.info(
+                    "Candidato detectado -> %s vs %s (%s, %s) | cuota favorito: %.2f",
+                    candidate.favorite_name,
+                    candidate.underdog_name,
+                    candidate.tournament_name,
+                    candidate.game_id,
+                    candidate.odds_prematch_favorite,
+                )
+                self.notifier.send_match_detected(candidate)
+
             if match.game_id in already_watched:
                 continue  # ya en seguimiento, no hace falta volver a ofrecerlo
             alert = self.trading_engine.evaluate(match)
@@ -432,6 +456,18 @@ class AlertOnlyBot:
         logger.info("Ciclo de escaneo (modo solo alerta): %d partidos en vivo recibidos.", len(live_matches))
 
         for match in live_matches:
+            candidate = self.trading_engine.check_candidate(match)
+            if candidate is not None:
+                logger.info(
+                    "Candidato detectado -> %s vs %s (%s, %s) | cuota favorito: %.2f",
+                    candidate.favorite_name,
+                    candidate.underdog_name,
+                    candidate.tournament_name,
+                    candidate.game_id,
+                    candidate.odds_prematch_favorite,
+                )
+                self.notifier.send_match_detected(candidate)
+
             alert = self.trading_engine.evaluate(match)
             if alert is None:
                 continue

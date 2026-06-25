@@ -68,6 +68,9 @@ class TradingEngine:
         # cuando empieza un nuevo set, sin volver a alertar dentro
         # del mismo set una vez ya se notificó.
         self._alerted_matches: Dict[str, int] = {}
+        # game_ids ya notificados como "candidato detectado" (primera vez
+        # que el partido aparece en vivo con cuota de favorito en rango).
+        self._seen_candidates: Set[str] = set()
 
     # ------------------------------------------------------------------
     # API pública
@@ -91,9 +94,47 @@ class TradingEngine:
             )
             return None
 
+    def check_candidate(self, match: MatchState) -> Optional[AlertEvent]:
+        """
+        Devuelve un AlertEvent la primera vez que un partido aparece en
+        vivo con cuota pre-partido del favorito dentro del rango. Las
+        llamadas posteriores para el mismo game_id devuelven None.
+        """
+        if match.game_id in self._seen_candidates:
+            return None
+
+        favorite_side = match.favorite_side
+        if favorite_side is None:
+            return None
+
+        favorite_prematch_odds = match.odds_prematch_for(favorite_side)
+        if not (FAVORITE_ODDS_MIN < favorite_prematch_odds < FAVORITE_ODDS_MAX):
+            return None
+
+        self._seen_candidates.add(match.game_id)
+        underdog_side = match.opponent(favorite_side)
+
+        return AlertEvent(
+            game_id=match.game_id,
+            circuit=match.circuit,
+            surface=match.surface,
+            tournament_name=match.tournament_name,
+            tournament_category=match.tournament_category,
+            favorite_name=match.player_name(favorite_side),
+            underdog_name=match.player_name(underdog_side),
+            odds_prematch_favorite=favorite_prematch_odds,
+            odds_live_favorite=match.live_odds_for(favorite_side),
+            current_set=match.current_set,
+            games_favorite=match.games_for(favorite_side),
+            games_underdog=match.games_for(underdog_side),
+            score_points=match.current_score_points,
+            reason="Partido candidato detectado (favorito en rango de cuota)",
+        )
+
     def reset_match(self, game_id: str) -> None:
         """Permite forzar el olvido de un partido (ej. al finalizar)."""
         self._alerted_matches.pop(game_id, None)
+        self._seen_candidates.discard(game_id)
 
     # ------------------------------------------------------------------
     # Lógica interna

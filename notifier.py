@@ -45,6 +45,26 @@ class TelegramNotifier:
         # porque _parse_selection_command es idempotente por game_id).
         self._update_offset: Optional[int] = None
 
+    def send_match_detected(self, alert: AlertEvent) -> bool:
+        """
+        Notifica que un partido candidato ha sido detectado en vivo por
+        primera vez: el favorito tiene cuota pre-partido en el rango de
+        interés. No implica que haya bache todavía; es un aviso previo
+        para que el usuario esté atento.
+        """
+        message = (
+            "👀 *PARTIDO CANDIDATO EN VIVO* 👀\n\n"
+            f"🏆 *Torneo:* {alert.tournament_name} ({alert.tournament_category})\n"
+            f"🎾 *Partido:* {alert.favorite_name} vs {alert.underdog_name} "
+            f"({alert.circuit} - {alert.surface})\n"
+            f"📈 *Cuota Inicial Favorito:* {alert.odds_prematch_favorite:.2f}\n"
+            f"➡️ *Cuota LIVE actual:* {alert.odds_live_favorite:.2f}\n"
+            f"📊 *Marcador:* Set {alert.current_set} "
+            f"[{alert.games_favorite}-{alert.games_underdog}]\n\n"
+            "_Vigilando este partido. Te avisaré si el favorito pierde el saque._"
+        )
+        return self._send_message(message)
+
     def send_alert(self, alert: AlertEvent) -> bool:
         """
         Envía la alerta formateada (modo automático original). Devuelve
