@@ -524,13 +524,17 @@ def _build_default_bot() -> TennisTradingBot:
     )
 
 
-def _build_shared_components():
+def _build_shared_components(with_tracker: bool = True):
     """
     Construye los componentes compartidos entre el modo automático
     (TennisTradingBot) y el modo de prueba manual (ManualWatchBot):
     data_provider, trading_engine, notifier, alert_logger y
     opening_odds_tracker. Aislar esto en una función evita duplicar la
     lógica de selección Mock/RapidAPI entre ambos modos.
+
+    with_tracker=False desactiva el OpeningOddsTracker y las llamadas a
+    fixtures, útil en ALERT_ONLY mode para no consumir cuota extra en
+    planes con límite diario bajo (p.ej. Free, 50 req/día).
     """
     opening_odds_tracker = None
 
@@ -538,16 +542,17 @@ def _build_shared_components():
         from data_provider import RapidAPITennisProvider
         from opening_odds_tracker import OpeningOddsTracker
 
-        opening_odds_tracker = OpeningOddsTracker(
-            mongo_uri=config.MONGO_URI,
-            db_name=config.MONGO_DB_NAME,
-            fixtures_collection=config.MONGO_FIXTURES_COLLECTION,
-            opening_odds_collection=config.MONGO_OPENING_ODDS_COLLECTION,
-            tournament_info_collection=config.MONGO_TOURNAMENT_INFO_COLLECTION,
-            fixtures_refresh_interval_seconds=config.FIXTURES_REFRESH_INTERVAL_SECONDS,
-            orphan_retry_cooldown_seconds=config.ORPHAN_LOOKUP_COOLDOWN_SECONDS,
-            server_selection_timeout_ms=config.MONGO_SERVER_SELECTION_TIMEOUT_MS,
-        )
+        if with_tracker:
+            opening_odds_tracker = OpeningOddsTracker(
+                mongo_uri=config.MONGO_URI,
+                db_name=config.MONGO_DB_NAME,
+                fixtures_collection=config.MONGO_FIXTURES_COLLECTION,
+                opening_odds_collection=config.MONGO_OPENING_ODDS_COLLECTION,
+                tournament_info_collection=config.MONGO_TOURNAMENT_INFO_COLLECTION,
+                fixtures_refresh_interval_seconds=config.FIXTURES_REFRESH_INTERVAL_SECONDS,
+                orphan_retry_cooldown_seconds=config.ORPHAN_LOOKUP_COOLDOWN_SECONDS,
+                server_selection_timeout_ms=config.MONGO_SERVER_SELECTION_TIMEOUT_MS,
+            )
 
         data_provider = RapidAPITennisProvider(
             api_key=config.RAPIDAPI_KEY,
@@ -614,8 +619,11 @@ def _build_alert_only_bot() -> AlertOnlyBot:
     únicamente dentro de la ventana de trading configurada y manda un
     aviso por candidato, sin selección ni seguimiento automático. Se
     activa con ALERT_ONLY_MODE_ENABLED=true en .env.
+
+    No crea OpeningOddsTracker (with_tracker=False) para no gastar
+    requests de fixtures en planes con cuota diaria baja.
     """
-    data_provider, trading_engine, notifier, alert_logger, opening_odds_tracker = _build_shared_components()
+    data_provider, trading_engine, notifier, alert_logger, opening_odds_tracker = _build_shared_components(with_tracker=False)
 
     trading_window = TradingWindow(
         timezone_name=config.ALERT_ONLY_MODE_TIMEZONE,
